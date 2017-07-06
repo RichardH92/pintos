@@ -15,6 +15,11 @@ static bool sleep_time_elapsed (struct alarm *t, uint64_t curr_tick);
 static void wake_thread (struct alarm *t);
 static struct alarm construct_alarm (struct thread *t, uint64_t start, uint64_t ticks);
 
+void alarm_init ()
+{
+	list_init (&sleeping_list);
+}
+
 
 /*  Adds the current thread to the sleeping list for ticks amount of
     time */

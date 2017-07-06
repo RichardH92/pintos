@@ -16,6 +16,6 @@ struct alarm {
 
 void alarm_sleep_current_thread (uint64_t start, uint64_t ticks);
 void alarm_check_sleeping_list (uint64_t curr_tick);
-//void thread_wake (struct thread *t);
+void alarm_init ();
 
 #endif
