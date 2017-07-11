@@ -102,6 +102,12 @@ thread_init (void)
   init_thread (initial_thread, "main", PRI_DEFAULT);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
+  list_init (&initial_thread->donor_list);
+  initial_thread->is_a_donor = false;
+  initial_thread->is_a_donee = false;
+  initial_thread->original_priority = initial_thread->priority;
+  initial_thread->donor_lock = NULL;
+
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -113,13 +119,6 @@ thread_start (void)
   struct semaphore idle_started;
   sema_init (&idle_started, 0);
   thread_create ("idle", PRI_MIN, idle, &idle_started);
-
-  list_init (&initial_thread->donor_list);
-  initial_thread->is_a_donor = false;
-  initial_thread->is_a_donee = false;
-  initial_thread->original_priority = initial_thread->priority;
-  initial_thread->donor_lock = NULL;
-  initial_thread->tid = allocate_tid ();
 
   /* Start preemptive thread scheduling. */
   intr_enable ();
@@ -225,6 +224,9 @@ thread_create (const char *name, int priority,
   /* Add to run queue. */
   thread_unblock (t);
 
+  if (t->priority > thread_current ()->priority)
+    thread_yield();
+
   return tid;
 }
 
@@ -270,30 +272,39 @@ thread_unblock (struct thread *t)
 
 static void insert_thread_ordered (struct thread *t)
 {
+  /*List is empty, insert in front*/
+  if (list_empty (&ready_list))
+    {
+      list_push_front (&ready_list, &t->elem);\
+      return;
+    }
+
+  /*T's priority is greater than every thread, insert in front*/
   struct list_elem *e = list_begin (&ready_list);
   struct thread *curr = list_entry (e, struct thread, elem);
 
-  if (curr->priority <= t->priority)
+  if (curr->priority < t->priority)
     {
       list_insert(e, &t->elem);
       return;
     }
 
+  /*Iterate through threads and insert at correct spot*/
   struct thread *prev = curr;
-  e = list_next(prev);
+  e = list_next(&prev->elem);
 
   while (e != list_end (&ready_list))
   {
     curr = list_entry (e, struct thread, elem);
 
-    if (prev->priority >= t->priority && t->priority >= curr->priority)
+    if (prev->priority >= t->priority && t->priority > curr->priority)
       {
         list_insert(e, &t->elem);
         return;
       }
 
-    struct thread *prev = curr;
-    e = list_next(prev);
+    prev = curr;
+    e = list_next(&prev->elem);
   }
 
   list_push_back (&ready_list, &t->elem);
@@ -551,15 +562,14 @@ thread_set_priority (int new_priority)
     }
   else
     {
-      int32_t temp_priority = thread_current ()->priority;
-
       old_level = intr_disable ();
+
+      int32_t temp_priority = thread_current ()->priority;
 
       thread_current ()->original_priority = new_priority;
       update_priority (thread_current (), new_priority);
 
       intr_set_level (old_level);
-
 
       if (new_priority < temp_priority)
         thread_yield ();
