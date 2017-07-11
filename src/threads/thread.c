@@ -71,6 +71,10 @@ static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
 
+static void insert_thread_ordered (struct thread *t);
+static void update_priority (struct thread *t, int new_priority);
+static struct thread * get_max_priority_donor (struct thread *donee);
+
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
    general and it is possible in this case only because loader.S
@@ -109,6 +113,13 @@ thread_start (void)
   struct semaphore idle_started;
   sema_init (&idle_started, 0);
   thread_create ("idle", PRI_MIN, idle, &idle_started);
+
+  list_init (&initial_thread->donor_list);
+  initial_thread->is_a_donor = false;
+  initial_thread->is_a_donee = false;
+  initial_thread->original_priority = initial_thread->priority;
+  initial_thread->donor_lock = NULL;
+  initial_thread->tid = allocate_tid ();
 
   /* Start preemptive thread scheduling. */
   intr_enable ();
@@ -183,6 +194,11 @@ thread_create (const char *name, int priority,
   /* Initialize thread. */
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
+  list_init (&t->donor_list);
+  t->is_a_donor = false;
+  t->is_a_donee = false;
+  t->donee = NULL;
+  t->original_priority = priority;
 
   /* Prepare thread for first run by initializing its stack.
      Do this atomically so intermediate values for the 'stack' 
@@ -245,9 +261,42 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+  
+  insert_thread_ordered (t);
+  
   t->status = THREAD_READY;
   intr_set_level (old_level);
+}
+
+static void insert_thread_ordered (struct thread *t)
+{
+  struct list_elem *e = list_begin (&ready_list);
+  struct thread *curr = list_entry (e, struct thread, elem);
+
+  if (curr->priority <= t->priority)
+    {
+      list_insert(e, &t->elem);
+      return;
+    }
+
+  struct thread *prev = curr;
+  e = list_next(prev);
+
+  while (e != list_end (&ready_list))
+  {
+    curr = list_entry (e, struct thread, elem);
+
+    if (prev->priority >= t->priority && t->priority >= curr->priority)
+      {
+        list_insert(e, &t->elem);
+        return;
+      }
+
+    struct thread *prev = curr;
+    e = list_next(prev);
+  }
+
+  list_push_back (&ready_list, &t->elem);
 }
 
 /* Returns the name of the running thread. */
@@ -316,7 +365,8 @@ thread_yield (void)
 
   old_level = intr_disable ();
   if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
+    insert_thread_ordered (cur);
+
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -339,19 +389,225 @@ thread_foreach (thread_action_func *func, void *aux)
     }
 }
 
+void 
+thread_donate_priority (struct thread *donee, struct lock *donor_lock)
+{ 
+
+  ASSERT (!intr_context ());
+  ASSERT (donee != NULL);
+  ASSERT (is_thread (donee));
+
+  enum intr_level old_level = intr_disable ();
+  struct thread *donor = thread_current ();
+
+  ASSERT (donor != NULL);
+  ASSERT (is_thread (donor));
+  ASSERT (donor->donee == NULL);
+  ASSERT (donor->is_a_donor == false);
+
+  donor->donee = donee;
+
+  list_push_back (&donee->donor_list, &donor->donor_elem);
+  donor->is_a_donor = true;
+  donor->donor_lock = donor_lock;
+  donee->priority = donor->priority;
+  donee->is_a_donee = true;
+
+  struct thread *nest_donor = donee;
+
+  ASSERT (nest_donor != NULL);
+
+  while (nest_donor->is_a_donor)
+    {
+      struct thread *nest_donee = nest_donor->donee;
+      
+      ASSERT (nest_donee != NULL);
+      ASSERT (nest_donee->is_a_donee);
+
+      if (donor->priority > nest_donee->priority)
+        {
+          nest_donee->priority = donor->priority;
+          nest_donor = nest_donee;
+          nest_donee = nest_donee->donee;
+        }
+      else
+        break;
+
+      if (!nest_donor->is_a_donor)
+        {
+          ASSERT (nest_donor->donee == NULL);
+          break;
+        }
+    }
+
+  intr_set_level (old_level);
+}
+
+/* Reverse the current thread's donated priority */
+void 
+thread_reverse_priority_donation (struct lock *donor_lock) 
+{
+  enum intr_level old_level;
+  
+  ASSERT (donor_lock != NULL);
+  ASSERT (!intr_context ());
+
+  old_level = intr_disable ();
+
+  struct thread *donee = thread_current ();
+
+  ASSERT (donee != NULL);
+  ASSERT (is_thread (donee));
+  ASSERT (!list_empty (&donee->donor_list));
+  ASSERT (donor_lock->holder == donee);
+
+  struct list_elem *e;
+
+  for (e = list_begin (&donee->donor_list); e != list_end (&donee->donor_list);
+   e = list_next (e))
+    {
+      ASSERT (e != NULL);
+
+      struct thread *t = list_entry (e, struct thread, donor_elem);
+
+      ASSERT (t != NULL);
+      ASSERT (is_thread (t));
+
+      if (t->donor_lock == donor_lock)
+        {
+          list_remove (&t->donor_elem);
+          t->is_a_donor = false;
+          t->donee = NULL;
+        }
+    }
+
+  if (list_empty (&donee->donor_list))
+    {
+      donee->priority = donee->original_priority;
+      donee->is_a_donee = false;
+    }
+  else
+    {
+      int new_priority = get_max_priority_donor (donee)->priority;
+      donee->priority = new_priority;
+    }
+
+  intr_set_level (old_level);
+}
+
+
+/* Find the thread in the donee's donor list that has the highest priority */
+static struct thread * get_max_priority_donor (struct thread *donee) 
+{
+
+  ASSERT (!list_empty (&donee->donor_list));
+
+  struct thread *max = NULL;
+  int priority = -1;
+  struct list_elem *e;
+
+  for (e = list_begin (&donee->donor_list); e != list_end (&donee->donor_list);
+       e = list_next (e))
+    {
+      ASSERT (e != NULL);
+
+      struct thread *t = list_entry (e, struct thread, donor_elem);
+
+      ASSERT (t != NULL);
+      ASSERT (is_thread (t));
+
+      if (t->priority > priority)
+        {
+          priority = t->priority;
+          max = t;
+        }
+    }
+
+  ASSERT (max != NULL);
+  ASSERT (is_thread (max));
+
+  return max;
+}
+
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
 thread_set_priority (int new_priority) 
 {
-  thread_current ()->priority = new_priority;
+  if (thread_mlfqs)
+    return;
+
+  enum intr_level old_level;
+
+  if (thread_current ()->is_a_donee)
+    {
+      old_level = intr_disable ();
+
+      thread_current ()->original_priority = new_priority;
+
+      if (new_priority > thread_current ()->priority)
+        update_priority (thread_current (), new_priority);
+
+      intr_set_level (old_level);
+    }
+  else
+    {
+      int32_t temp_priority = thread_current ()->priority;
+
+      old_level = intr_disable ();
+
+      thread_current ()->original_priority = new_priority;
+      update_priority (thread_current (), new_priority);
+
+      intr_set_level (old_level);
+
+
+      if (new_priority < temp_priority)
+        thread_yield ();
+    }
 }
 
 /* Returns the current thread's priority. */
 int
-thread_get_priority (void) 
+thread_get_priority (void)
 {
-  return thread_current ()->priority;
+  int temp_priority;
+  enum intr_level old_level;
+
+  if (thread_mlfqs)
+    old_level = intr_disable ();
+
+  temp_priority = thread_current ()->priority;
+
+  if (thread_mlfqs)
+    intr_set_level (old_level);
+
+  return temp_priority;
 }
+
+/* Update thread t's priority to new_priority */
+static void update_priority (struct thread *t, int new_priority)
+{
+  ASSERT (intr_get_level () == INTR_OFF);
+
+
+  if (t->priority != new_priority)
+    {
+      t->priority = new_priority;
+
+      if (t->priority > PRI_MAX)
+        t->priority = PRI_MAX;
+      else if (t->priority < PRI_MIN)
+        t->priority = PRI_MIN;
+
+
+      if (t->status == THREAD_READY) {
+        list_remove (&t->elem);
+        insert_thread_ordered (t);
+      }
+
+    } 
+}
+
 
 /* Sets the current thread's nice value to NICE. */
 void

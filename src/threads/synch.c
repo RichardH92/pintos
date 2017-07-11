@@ -32,6 +32,8 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 
+static struct thread * sema_pop_max_priority_waiter (struct semaphore *sema);
+
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
    manipulating it:
@@ -108,16 +110,58 @@ sema_try_down (struct semaphore *sema)
 void
 sema_up (struct semaphore *sema) 
 {
+  struct thread *max = NULL;
   enum intr_level old_level;
 
   ASSERT (sema != NULL);
 
   old_level = intr_disable ();
-  if (!list_empty (&sema->waiters)) 
-    thread_unblock (list_entry (list_pop_front (&sema->waiters),
-                                struct thread, elem));
+  
+  if (!list_empty (&sema->waiters))
+    {
+      max = sema_pop_max_priority_waiter (sema);
+      ASSERT (max != NULL);
+      thread_unblock (max);
+    }
+
   sema->value++;
   intr_set_level (old_level);
+
+  if (max != NULL && max->priority > thread_current ()->priority) 
+    {
+      if (intr_context ())
+        intr_yield_on_return ();
+      else
+        thread_yield ();
+    }
+}
+
+static struct thread * sema_pop_max_priority_waiter (struct semaphore *sema)
+{
+  struct thread *max = NULL;
+  int priority = -1;
+  struct list_elem *e;
+
+  for (e = list_begin (&sema->waiters); e != list_end (&sema->waiters);
+       e = list_next (e))
+    {
+      ASSERT (e != NULL);
+
+      struct thread *t = list_entry (e, struct thread, elem);
+
+      ASSERT (t != NULL);
+
+      if (t->priority > priority)
+        {
+          priority = t->priority;
+          max = t;
+        }
+    }
+
+  ASSERT (max != NULL);
+  list_remove (&max->elem);
+
+  return max;
 }
 
 static void sema_test_helper (void *sema_);
@@ -196,8 +240,16 @@ lock_acquire (struct lock *lock)
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
 
+  enum intr_level old_level = intr_disable ();
+
+  if (!thread_mlfqs && lock->holder != NULL && lock->holder->priority < thread_current ()->priority)
+    thread_donate_priority (lock->holder, lock);
+
   sema_down (&lock->semaphore);
+
   lock->holder = thread_current ();
+
+  intr_set_level (old_level);
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -228,11 +280,28 @@ lock_try_acquire (struct lock *lock)
 void
 lock_release (struct lock *lock) 
 {
+  bool yield = false;
+
   ASSERT (lock != NULL);
   ASSERT (lock_held_by_current_thread (lock));
 
+  enum intr_level old_level = intr_disable ();
+
+  if (!thread_mlfqs && 
+    thread_current ()->is_a_donee)
+    {
+      thread_reverse_priority_donation (lock);
+      yield = true;
+    }
+
+
   lock->holder = NULL;
   sema_up (&lock->semaphore);
+
+  intr_set_level (old_level);
+
+  if (yield)
+    thread_yield ();
 }
 
 /* Returns true if the current thread holds LOCK, false

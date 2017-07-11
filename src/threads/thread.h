@@ -93,6 +93,13 @@ struct thread
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 
+    int original_priority;
+    struct list donor_list;
+    struct list_elem donor_elem;
+    struct thread *donee;
+    struct lock *donor_lock;
+    bool is_a_donor;
+    bool is_a_donee;
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
@@ -138,5 +145,9 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+
+struct thread * thread_check_for_donation (struct lock *donor_lock);
+void thread_donate_priority (struct thread *donee, struct lock *donor_lock);
+void thread_reverse_priority_donation (struct lock *donor_lock);
 
 #endif /* threads/thread.h */

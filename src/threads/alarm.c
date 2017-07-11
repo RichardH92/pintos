@@ -76,11 +76,10 @@ alarm_check_sleeping_list (uint64_t curr_tick)
 static bool sleep_time_elapsed (struct alarm *t, uint64_t curr_tick)
 {
 
-  int64_t start = t->start_sleep_tick;
+  uint64_t start = t->start_sleep_tick;
   ASSERT (curr_tick >= start);
 
-  int64_t interval = t->amount_ticks_to_sleep;
-  ASSERT (interval >= 0);
+  uint64_t interval = t->amount_ticks_to_sleep;
 
   if ((curr_tick - start) >= interval)
     return true;
