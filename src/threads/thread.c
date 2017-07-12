@@ -86,6 +86,7 @@ static void thread_recalculate_load_avg (void);
 
 static int recalculate_priority (struct thread *t);
 static void recalculate_recent_cpu (struct thread *t);
+static int get_num_ready_threads (void);
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -119,6 +120,9 @@ thread_init (void)
   initial_thread->is_a_donee = false;
   initial_thread->original_priority = initial_thread->priority;
   initial_thread->donor_lock = NULL;
+
+  initial_thread->nice = 0;
+  initial_thread->recent_cpu = int_to_fixed (0);
 
   load_avg = int_to_fixed (0);
 }
@@ -236,6 +240,8 @@ thread_create (const char *name, int priority,
   t->is_a_donee = false;
   t->donee = NULL;
   t->original_priority = priority;
+  t->nice = thread_current ()->nice;
+  t->recent_cpu = thread_current ()->recent_cpu;
 
   /* Prepare thread for first run by initializing its stack.
      Do this atomically so intermediate values for the 'stack' 
@@ -743,7 +749,7 @@ static void thread_recalculate_load_avg (void)
 
   enum intr_level old_level = intr_disable ();
 
-  int ready_threads = list_size (&ready_list);
+  int ready_threads = get_num_ready_threads ();
 
   fixed_point_t temp_one = fixed_div (int_to_fixed(59), int_to_fixed(60));
   temp_one = fixed_mult (temp_one, load_avg);
@@ -753,6 +759,15 @@ static void thread_recalculate_load_avg (void)
   load_avg = fixed_add (temp_one, temp_two);
 
   intr_set_level (old_level);
+}
+
+static int get_num_ready_threads (void)
+{
+  int count = list_size (&ready_list);
+  if (thread_current () != idle_thread)
+    count = count + 1;
+
+  return count;
 }
 
 
