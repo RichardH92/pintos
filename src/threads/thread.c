@@ -156,22 +156,17 @@ thread_tick (void)
 
       enum intr_level old_level = intr_disable ();
 
+      t->recent_cpu = fixed_int_add (t->recent_cpu, 1);
+
       if (timer_ticks () % TIMER_FREQ == 0)
         {
+          thread_recalculate_load_avg ();
           thread_recalculate_all_recent_cpu ();
           thread_recalculate_all_priorities ();
-          thread_recalculate_load_avg ();
         }
 
       else if (timer_ticks () % 4 == 0)
           thread_recalculate_all_priorities ();
-
-      if (t != idle_thread)
-        t->recent_cpu = fixed_int_add (t->recent_cpu, 1);
-      else
-        {
-          //ASSERT (ready_threads == 0);
-        }
       
       intr_set_level (old_level);
     }
@@ -705,7 +700,8 @@ static int recalculate_priority (struct thread *t)
   fixed_point_t new_priority = int_to_fixed (PRI_MAX);
   fixed_point_t temp = fixed_int_div (t->recent_cpu, 4);
   new_priority = fixed_sub (new_priority, temp);
-  temp = int_to_fixed (t->nice * 2);
+  temp = int_to_fixed (t->nice);
+  temp = fixed_int_mult (temp, 2);
   new_priority = fixed_sub (new_priority, temp);
 
   return fixed_to_int (new_priority, 0);
@@ -764,7 +760,8 @@ static void thread_recalculate_load_avg (void)
 static int get_num_ready_threads (void)
 {
   int count = list_size (&ready_list);
-  if (thread_current () != idle_thread)
+  
+  if (thread_current () != idle_thread && thread_current()->status == THREAD_RUNNING)
     count = count + 1;
 
   return count;
