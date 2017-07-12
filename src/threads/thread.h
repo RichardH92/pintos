@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/fixed_point.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -100,6 +101,9 @@ struct thread
     struct lock *donor_lock;
     bool is_a_donor;
     bool is_a_donee;
+
+    int nice;
+    fixed_point_t recent_cpu;
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */

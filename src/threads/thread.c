@@ -11,6 +11,8 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "threads/fixed_point.h"
+#include "devices/timer.h"
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -54,6 +56,8 @@ static long long user_ticks;    /* # of timer ticks in user programs. */
 #define TIME_SLICE 4            /* # of timer ticks to give each thread. */
 static unsigned thread_ticks;   /* # of timer ticks since last yield. */
 
+static fixed_point_t load_avg;
+
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
@@ -74,6 +78,14 @@ static tid_t allocate_tid (void);
 static void insert_thread_ordered (struct thread *t);
 static void update_priority (struct thread *t, int new_priority);
 static struct thread * get_max_priority_donor (struct thread *donee);
+
+static void thread_recalculate_all_priorities (void);
+static void thread_recalculate_all_recent_cpu (void);
+static void thread_recalculate_load_avg (void);
+//static void thread_recalculate_current_priority (void);
+
+static int recalculate_priority (struct thread *t);
+static void recalculate_recent_cpu (struct thread *t);
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -108,6 +120,7 @@ thread_init (void)
   initial_thread->original_priority = initial_thread->priority;
   initial_thread->donor_lock = NULL;
 
+  load_avg = int_to_fixed (0);
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -133,6 +146,31 @@ void
 thread_tick (void) 
 {
   struct thread *t = thread_current ();
+
+  if (thread_mlfqs) 
+    {
+
+      enum intr_level old_level = intr_disable ();
+
+      if (timer_ticks () % TIMER_FREQ == 0)
+        {
+          thread_recalculate_all_recent_cpu ();
+          thread_recalculate_all_priorities ();
+          thread_recalculate_load_avg ();
+        }
+
+      else if (timer_ticks () % 4 == 0)
+          thread_recalculate_all_priorities ();
+
+      if (t != idle_thread)
+        t->recent_cpu = fixed_int_add (t->recent_cpu, 1);
+      else
+        {
+          //ASSERT (ready_threads == 0);
+        }
+      
+      intr_set_level (old_level);
+    }
 
   /* Update statistics. */
   if (t == idle_thread)
@@ -218,6 +256,9 @@ thread_create (const char *name, int priority,
   sf = alloc_frame (t, sizeof *sf);
   sf->eip = switch_entry;
   sf->ebp = 0;
+
+  if (thread_mlfqs)
+    recalculate_priority (t);
 
   intr_set_level (old_level);
 
@@ -618,37 +659,167 @@ static void update_priority (struct thread *t, int new_priority)
     } 
 }
 
+/* Recalculate the priority for all of the threads */
+static void thread_recalculate_all_priorities (void)
+{
+  enum intr_level old_level = intr_disable ();
+
+  struct list_elem *e;
+
+  for (e = list_begin (&all_list); e != list_end (&all_list);
+       e = list_next (e))
+    {
+      struct thread *t = list_entry (e, struct thread, allelem);
+      int new_priority = recalculate_priority (t);
+      update_priority (t, new_priority);
+    } 
+
+  intr_set_level (old_level);
+}
+
+/* Recalculate and update the priority for the current thread */
+/*static void thread_recalculate_current_priority (void)
+{  
+  enum intr_level old_level = intr_disable ();
+
+  struct thread *t = thread_current ();
+  int new_priority = recalculate_priority (t);
+  update_priority (t, new_priority);
+
+  intr_set_level (old_level);
+}*/
+
+/* Recalculate the priority for thread t */
+static int recalculate_priority (struct thread *t)
+{
+  ASSERT (intr_get_level () == INTR_OFF);
+
+  //priority = PRI_MAX - (recent_cpu / 4) - (nice * 2)
+
+  fixed_point_t new_priority = int_to_fixed (PRI_MAX);
+  fixed_point_t temp = fixed_int_div (t->recent_cpu, 4);
+  new_priority = fixed_sub (new_priority, temp);
+  temp = int_to_fixed (t->nice * 2);
+  new_priority = fixed_sub (new_priority, temp);
+
+  return fixed_to_int (new_priority, 0);
+}
+
+/* Recalculate the recent cpu for all threads */
+static void thread_recalculate_all_recent_cpu (void)
+{
+  enum intr_level old_level = intr_disable ();
+
+  struct list_elem *e;
+
+  for (e = list_begin (&all_list); e != list_end (&all_list);
+       e = list_next (e))
+    {
+      struct thread *t = list_entry (e, struct thread, allelem);
+      recalculate_recent_cpu (t);
+    } 
+
+  intr_set_level (old_level);
+}
+
+/* Recalculate the recent cpu for thread t */
+static void recalculate_recent_cpu (struct thread *t)
+{
+  ASSERT (intr_get_level () == INTR_OFF);
+
+  //recent_cpu = (2*load_avg)/(2*load_avg + 1) * recent_cpu + nice
+
+  fixed_point_t temp_one = fixed_int_mult (load_avg, 2);
+  fixed_point_t temp_two = fixed_int_add (temp_one, 1);
+  temp_one = fixed_div (temp_one, temp_two);
+  temp_one = fixed_mult (temp_one, t->recent_cpu);
+  t->recent_cpu = fixed_int_add (temp_one, t->nice);
+}
+
+/* Recalculate the load average */
+static void thread_recalculate_load_avg (void)
+{
+  //load_avg = (59/60)*load_avg + (1/60)*ready_threads
+
+  enum intr_level old_level = intr_disable ();
+
+  int ready_threads = list_size (&ready_list);
+
+  fixed_point_t temp_one = fixed_div (int_to_fixed(59), int_to_fixed(60));
+  temp_one = fixed_mult (temp_one, load_avg);
+
+  fixed_point_t temp_two = int_to_fixed (ready_threads);
+  temp_two = fixed_div (temp_two, int_to_fixed(60));
+  load_avg = fixed_add (temp_one, temp_two);
+
+  intr_set_level (old_level);
+}
+
 
 /* Sets the current thread's nice value to NICE. */
 void
-thread_set_nice (int nice UNUSED) 
+thread_set_nice (int nice) 
 {
-  /* Not yet implemented. */
+  if (nice > 20)
+    nice = 20;
+  else if (nice < -20)
+    nice = -20;
+
+  enum intr_level old_level = intr_disable ();
+
+  int old_priority = thread_current ()->priority;
+  thread_current ()->nice = nice;
+  int new_priority = recalculate_priority (thread_current ());
+  update_priority (thread_current (), new_priority);
+
+  intr_set_level (old_level);
+
+  if (new_priority < old_priority)
+    thread_yield ();
 }
 
 /* Returns the current thread's nice value. */
 int
-thread_get_nice (void) 
+thread_get_nice (void)
 {
-  /* Not yet implemented. */
-  return 0;
+  int temp_nice;
+
+  enum intr_level old_level = intr_disable ();
+  temp_nice = thread_current ()->nice;
+  intr_set_level (old_level);
+
+  return temp_nice;
 }
 
 /* Returns 100 times the system load average. */
 int
 thread_get_load_avg (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  fixed_point_t temp;
+
+  enum intr_level old_level = intr_disable ();
+  temp = load_avg;
+  intr_set_level (old_level);
+  temp = fixed_int_mult (load_avg, 100);
+
+  int load = fixed_to_int (temp, 1);
+
+  return load;
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
 int
 thread_get_recent_cpu (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  fixed_point_t temp;
+
+  enum intr_level old_level = intr_disable ();
+  temp = fixed_int_mult (thread_current ()->recent_cpu, 100);
+  intr_set_level (old_level);
+
+  return fixed_to_int (temp, 1);
 }
+
 
 /* Idle thread.  Executes when no other thread is ready to run.
 
