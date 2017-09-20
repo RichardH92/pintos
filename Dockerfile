@@ -27,13 +27,11 @@ RUN apt-get clean autoclean && \
     rm -rf /var/lib/apt/* /var/lib/cache/* /var/lib/log/*           
 
 COPY src /pintos
-COPY env-prep.sh /pintos
+RUN /pintos/env-prep.sh
 
 WORKDIR /pintos
 
 # Add Pintos to PATH
 ENV PATH=/pintos/utils:$PATH
-
-RUN env-prep.sh
 
 CMD ["sleep", "infinity"]
