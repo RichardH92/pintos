@@ -26,8 +26,21 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp);
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
 tid_t
-process_execute (const char *file_name) 
+process_execute (const char *argv) 
 {
+  char *file_name;
+  char *token, *save_ptr;
+  
+  token = strtok_r ((char *) argv, " ", &save_ptr);
+  file_name = token;
+
+  while (token != NULL)
+  {
+    //TODO: Change this to push args onto stack
+    printf ("'%s'\n", token);
+    token = strtok_r (NULL, " ", &save_ptr);
+  };
+
   char *fn_copy;
   tid_t tid;
 
