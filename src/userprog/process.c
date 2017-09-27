@@ -20,27 +20,15 @@
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
+static void setup_stack_args(void *esp, const char *args);
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
 tid_t
-process_execute (const char *argv) 
+process_execute (const char *file_name) 
 {
-  char *file_name;
-  char *token, *save_ptr;
-  
-  token = strtok_r ((char *) argv, " ", &save_ptr);
-  file_name = token;
-
-  while (token != NULL)
-  {
-    //TODO: Change this to push args onto stack
-    printf ("'%s'\n", token);
-    token = strtok_r (NULL, " ", &save_ptr);
-  };
-
   char *fn_copy;
   tid_t tid;
 
@@ -318,6 +306,8 @@ load (const char *file_name, void (**eip) (void), void **esp)
   if (!setup_stack (esp))
     goto done;
 
+  setup_stack_args(*esp, file_name);
+
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;
 
@@ -450,11 +440,30 @@ setup_stack (void **esp)
     {
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
       if (success)
-        *esp = PHYS_BASE;
+        {
+          *esp = PHYS_BASE;
+        }
       else
         palloc_free_page (kpage);
     }
   return success;
+}
+
+static void
+setup_stack_args(void *esp, const char *args) 
+{
+  char *file_name;
+  char *token, *save_ptr;
+  
+  token = strtok_r ((char *) args, " ", &save_ptr);
+  file_name = token;
+
+  while (token != NULL)
+  {
+    //TODO: Change this to push args onto stack
+    printf ("'%s'\n", token);
+    token = strtok_r (NULL, " ", &save_ptr);
+  };
 }
 
 /* Adds a mapping from user virtual address UPAGE to kernel
