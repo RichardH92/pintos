@@ -21,6 +21,7 @@
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
 static void setup_stack_args(void *esp, const char *args);
+static uint32_t get_num_args(const char *args);
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
@@ -452,18 +453,52 @@ setup_stack (void **esp)
 static void
 setup_stack_args(void *esp, const char *args) 
 {
-  char *file_name;
+  const size_t WORD_SIZE = 4;
+  const size_t MAX_LEN = 1024;
+
+  uint32_t num_args = get_num_args(args);
+  void *curr_stack_ptr = esp;
+
+  //Set esp + 0 to NULL ptr
+  *((void **) curr_stack_ptr) = NULL;
+  curr_stack_ptr++;
+
+  //Set esp + 1 to argc
+  *((int *) curr_stack_ptr) = num_args;
+  curr_stack_ptr = curr_stack_ptr + sizeof(int);
+
+  //Init argv pointer
+  char **argv = (char **) curr_stack_ptr;
+
+  //Leave room for argv + word alignment
+  size_t argv_req_space = sizeof(char *) * (num_args + 2);
+  size_t word_aligntment_offset = argv_req_space % WORD_SIZE;
+  curr_stack_ptr = curr_stack_ptr + argv_req_space + word_aligntment_offset;
+  
+  //Populate stack with args and argv with the ptrs
   char *token, *save_ptr;
+  uint32_t argv_count = 0;
   
   token = strtok_r ((char *) args, " ", &save_ptr);
-  file_name = token;
+  size_t len = strlcpy((char *) curr_stack_ptr, (const char *) token, MAX_LEN);
+  argv[argv_count] = (char *) curr_stack_ptr;
+  curr_stack_ptr = curr_stack_ptr + len;
+  argv_count++;
 
   while (token != NULL)
   {
-    //TODO: Change this to push args onto stack
-    printf ("'%s'\n", token);
     token = strtok_r (NULL, " ", &save_ptr);
+    len = strlcpy((char *) curr_stack_ptr, (const char *) token, MAX_LEN);
+    argv[argv_count] = (char *) curr_stack_ptr;
+    curr_stack_ptr = curr_stack_ptr + len;
+    argv_count++;
   };
+}
+
+static uint32_t
+get_num_args(const char *args)
+{
+  return 0;
 }
 
 /* Adds a mapping from user virtual address UPAGE to kernel
